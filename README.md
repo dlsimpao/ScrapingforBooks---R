@@ -7,7 +7,7 @@ I web scrape Goodreads for book titles from authors I like.
 - rselenium
 
 # For quick use
-Run all the code. Then simply use the `GetBookInfo` function at the bottom of the Rmd file. Input author = '(author)' and how many pages you want to scrape after the initial page.
+Run all the code. Then simply use the `GetBookInfo` function at the bottom of the Rmd file. Input author = '(author)' and how many pages you want to scrape after the initial page. Then, you will see a file labeled "(author)\_related\_books.csv" in the same file location as your Rmd file.
 
 # [Rvest](https://cran.r-project.org/web/packages/rvest/rvest.pdf)
 Rvest allows you to query through an html document to retrieve the information you need.
