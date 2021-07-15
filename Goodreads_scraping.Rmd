@@ -1,0 +1,281 @@
+# Webscraping Goodreads
+
+```{r, message = FALSE}
+library(tidyverse)
+library(rvest)
+library(RSelenium)
+```
+
+
+Authors
+- Ryan Holiday
+- Derren Brown
+- Scott Berkun
+
+[Url to search on](https://www.goodreads.com/search?utf8=%E2%9C%93&q=&search_type=books&search%5Bfield%5D=on)
+
+
+## RSelenium Approach
+```{r}
+#Chrome version
+#91.0.4472.124
+
+port <- httpuv::randomPort()
+# find a version of chromedriver that is compatible with your chrome
+# binman::list_versions("chromedriver")
+server <- wdman::chrome(port = port, version = "91.0.4472.101", verbose = FALSE)
+rd <- remoteDriver(port = port)
+```
+
+### Opens up local browser
+```{r}
+rd$open(silent = TRUE)
+# check if there is any error messages
+stopifnot(is.null(rd$sessionInfo$message))
+
+rd$navigate("https://www.goodreads.com/search?utf8=%E2%9C%93&q=&search_type=books&search%5Bfield%5D=on")
+```
+
+### Make query
+```{r}
+rd$findElement("css", "#search_query_main")$clickElement()
+rd$sendKeysToActiveElement(list("Rick Riordan"))
+rd$sendKeysToActiveElement(list(key = "enter"))
+rd$refresh()
+```
+
+# Rvest webscraping
+```{r, eval = FALSE}
+## Don't RUN, just for testing
+h = rd$getPageSource()[[1]] %>% 
+  read_html()
+
+# title scrape
+h %>% 
+  html_nodes("a.bookTitle") %>% 
+  html_nodes("span") %>% 
+  html_text()
+
+# info scrape
+info_toclean = h %>% 
+  html_nodes("span.greyText.smallText.uitext") %>% 
+  html_text() %>% 
+  gsub("[ —]","",.) %>% 
+  strsplit(.,"\n")
+
+# get exceptions for missing information
+format_info = function(x){
+  r = tryCatch(
+    tibble(Ratings = x[[2]], Published = x[[5]]),
+    error = function(cnd){
+    tibble(Ratings = x[[2]], Published = "unknown")
+    },
+    finally = function(){
+    tibble(Ratings = "unknown", Published = "unknown")
+      }
+  )
+  return(r)
+}
+
+
+lapply(info_toclean, function(x) format_info(x) ) %>% bind_rows()
+
+# ratings
+info_toclean[2]
+
+# publishing year
+info_toclean[[3]][5]
+
+# number of editions
+info_toclean[[3]][7]
+  
+# multiple authors scrape
+h %>% 
+  html_nodes(xpath = "//*[@itemprop='author']") %>% 
+  html_text() %>% 
+  gsub("\n","",.) %>% 
+  gsub("(Goodreads Author)","Author",.) %>% 
+  strsplit(",")
+
+rd$findElement("css","next_page")$clickElement()
+```
+
+# Loop across the next 4 pages
+```{r}
+getBookInfo_part1 = function(pages, rd){
+  book_title_list = tibble(Title = NULL)
+  book_info_df = tibble(Rating = NULL, Published = NULL)
+  book_authors_list = tibble(`Author/s` = NULL)
+  
+  h = rd$getPageSource()[[1]] %>% 
+      read_html()
+  
+  # can loop through more pages if desired
+  for (i in 1:pages){
+    # remote driver to current page
+    h = rd$getPageSource()[[1]] %>% 
+      read_html()
+    
+    # fill in book titles
+    book_title_list = bind_rows(
+      book_title_list,
+      h %>% 
+      html_nodes("a.bookTitle") %>% 
+      html_nodes("span") %>% 
+      html_text() %>% 
+        tibble(Title = .)
+    )
+    
+    # info scrape
+    info = h %>% 
+      html_nodes("span.greyText.smallText.uitext") %>% 
+      html_text() %>% 
+      # cleaning unnecessary characters
+      gsub("[ —]","",.) %>% 
+      strsplit(.,"\n")
+    
+      book_info_df = bind_rows(
+        book_info_df, 
+        lapply(info, function(x) format_info(x)) %>% bind_rows()
+      )
+      
+    # fill in author titles
+    book_authors_list = bind_rows(
+      book_authors_list,
+      h %>% 
+        #xpath search using itemprop
+        html_nodes(xpath = "//*[@itemprop='author']") %>% 
+        html_text() %>% 
+        gsub("\n","",.) %>% 
+        gsub("(Goodreads Author)","Author",.) %>%
+        tibble(`Author/s` = .)
+    )
+    
+      rd$findElement("css",".next_page")$clickElement()
+  }
+  # all book info
+  book_all_info = cbind(book_title_list, book_info_df, book_authors_list)
+  return(book_all_info)
+}
+
+unclean_bookinfo = getBookInfo_part1(pages = 5, rd)
+```
+  
+  
+```{r}
+getBookInfo_part2 = function(unclean_bookinfo){
+  # clean Rating info
+  #book_all_info$Ratings
+  
+  # cleans the Rating column into aggregate rating score and total rating count
+  book_all_info = unclean_bookinfo %>% 
+    separate(Ratings, into = c("RatingScore","RatingCount"),"avgrating") %>% 
+    mutate(RatingCount = case_when(
+      grepl("ratings",RatingCount) ~ gsub("ratings","",RatingCount)
+    )) %>% 
+    mutate(RatingCount = case_when(
+      grepl(",",RatingCount) ~ gsub(",","",RatingCount),
+      TRUE ~ RatingCount
+    )
+  )
+  
+  # cleans column types for analysis
+  book_all_info = book_all_info %>% 
+    mutate(
+    RatingCount = as.numeric(RatingCount),
+    RatingScore = as.numeric(RatingScore),
+    Published = as.numeric(Published)
+  ) %>% 
+    select(Title, `Author/s`,RatingScore, RatingCount, Published)
+  
+  return(book_all_info)
+}
+
+clean_BI = getBookInfo_part2(unclean_bookinfo = unclean_bookinfo)
+```
+
+```{r}
+
+write_bookinfo = function(clean_bookinfo, author){
+  book_all_info = clean_bookinfo %>% 
+    arrange(Published, RatingScore,RatingCount) %>% 
+    distinct(Title, .keep_all = TRUE)
+  
+  write.csv(book_all_info, paste0(author,"_related_books.csv"))
+}
+
+write_bookinfo(clean_BI)
+```
+
+# Making everything above into a function
+```{r}
+# supporting functions
+
+# open_remotedrive
+# navigate_query
+# format_info
+# getBookInfo_part1
+# getBookInfo_part2
+# write_bookinfo
+
+# opens server
+open_remotedrive = function(version = "91.0.4472.101"){
+  port <- httpuv::randomPort()
+  # find a version of chromedriver that is compatible with your chrome
+  # binman::list_versions("chromedriver")
+  server <- wdman::chrome(port = port, version = version, verbose = FALSE)
+  rd <- remoteDriver(port = port)
+  rd$open(silent = TRUE)
+  # check if there is any error messages
+  stopifnot(is.null(rd$sessionInfo$message))
+  
+  return(rd)
+}
+
+# navigate query
+navigate_query = function(author, rd){
+
+  rd$navigate("https://www.goodreads.com/search?utf8=%E2%9C%93&q=&search_type=books&search%5Bfield%5D=on")
+  rd$findElement("css", "#search_query_main")$clickElement()
+  rd$sendKeysToActiveElement(list(author))
+  rd$sendKeysToActiveElement(list(key = "enter"))
+  rd$refresh()
+}
+
+# get exceptions for missing information
+format_info = function(x){
+  r = tryCatch(
+    tibble(Ratings = x[[2]], Published = x[[5]]),
+    error = function(cnd){
+    tibble(Ratings = x[[2]], Published = "unknown")
+    },
+    finally = function(){
+    tibble(Ratings = "unknown", Published = "unknown")
+      }
+  )
+  return(r)
+}
+
+
+```
+
+```{r}
+## RSelenium Approach
+
+
+getBookInfo = function(author, pages){
+  rd = open_remotedrive()
+  navigate_query(author, rd)
+  unclean_bookinfo = getBookInfo_part1(pages = pages, rd)
+  clean_bookinfo = getBookInfo_part2(unclean_bookinfo = unclean_bookinfo)
+  write_bookinfo(clean_bookinfo, author = author)
+  
+  rd$close()
+}
+
+getBookInfo(author = "Malcolm Gladwell", pages = 3)
+
+```
+
+
+```
